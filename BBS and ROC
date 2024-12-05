@@ -1,0 +1,379 @@
+#BBS plot for SPEAR
+
+import netCDF4 as nc
+import numpy as np
+import matplotlib.pyplot as plt
+import datetime
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
+# SPEAR forecast files
+forecast_files = [
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2012.05.nc',
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2014.05.nc',
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2017.05.nc',
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2020.05.nc'
+]
+
+# Observation file
+observation_file = '/data/aydin/project/transition/USA/BSS_new/data/observation/daymet/precipitation/res2spear_all/concatenated_daymet_res2spear.nc'
+observation_data = nc.Dataset(observation_file, 'r')
+observation_prcp = observation_data.variables['prcp'][:]
+
+# Define Texas region
+lat_min, lat_max = 25, 40
+lon_min, lon_max = 252, 268 
+
+# Threshold
+lower_threshold = 10.0  
+
+# Initialize arrays to store BSS values
+bss_maps = []
+
+# SPEAR BSS Calculation
+for j, file in enumerate(forecast_files):
+    forecast_data = nc.Dataset(file, 'r')
+    forecast_prcp = forecast_data.variables['precip'][:]
+
+    # Temporal Alignment
+    forecast_year = int(file.split('_')[-1].split('.')[0][:4])
+    forecast_month = int(file.split('.')[-2][-2:]) 
+    start_date = datetime.datetime(forecast_year, forecast_month, 1)
+    end_date = datetime.datetime(forecast_year, forecast_month, 30) 
+
+    observation_time = nc.num2date(observation_data.variables['time'][:],
+                                   observation_data.variables['time'].units,
+                                   observation_data.variables['time'].calendar)
+    time_mask = (observation_time >= start_date) & (observation_time <= end_date)
+    observation_prcp_subset = observation_prcp[time_mask, :, :]
+
+    # Spatial Subsetting
+    forecast_lat = forecast_data.variables['lat'][:]
+    forecast_lon = forecast_data.variables['lon'][:]
+    observation_lat = observation_data.variables['lat'][:]
+    observation_lon = observation_data.variables['lon'][:]
+
+    lat_mask_forecast = (forecast_lat >= lat_min) & (forecast_lat <= lat_max)
+    lon_mask_forecast = (forecast_lon >= lon_min) & (forecast_lon <= lon_max)
+    lat_mask_observation = (observation_lat >= lat_min) & (observation_lat <= lat_max)
+    lon_mask_observation = (observation_lon >= lon_min) & (observation_lon <= lon_max)
+
+    forecast_prcp = forecast_prcp[:, :, lat_mask_forecast, :][:, :, :, lon_mask_forecast]
+    observation_prcp_subset = observation_prcp_subset[:, lat_mask_observation, :][:, :, lon_mask_observation]
+
+    # Ensemble Handling (Probabilistic)
+    forecast_prob_lower = np.mean(forecast_prcp <= lower_threshold, axis=0) 
+
+    # Average over time
+    forecast_prob_lower_matched = np.mean(forecast_prob_lower, axis=0)
+
+    # Flatten arrays
+    forecast_prob_lower_flat = forecast_prob_lower_matched.flatten()
+    observation_binary_lower = (observation_prcp_subset <= lower_threshold).flatten()
+
+    # BSS Calculation
+    bs = np.mean((forecast_prob_lower_flat - observation_binary_lower) ** 2)  
+    bs_ref = np.mean(observation_binary_lower) * (1 - np.mean(observation_binary_lower))  
+    bss = 1 - (bs / bs_ref) 
+
+    # Store BSS map
+    bss_maps.append(forecast_prob_lower_matched) 
+
+    forecast_data.close()
+
+# Calculate mean BSS map
+mean_bss_map = np.mean(bss_maps, axis=0)
+
+# Plotting Mean BSS Map
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree(central_longitude=-100))
+
+contour_levels = np.linspace(0, 0.5, 11) 
+im = ax.contourf(observation_lon[lon_mask_observation], observation_lat[lat_mask_observation], mean_bss_map,
+                 transform=ccrs.PlateCarree(), cmap='inferno', levels=contour_levels, extend='both')
+
+ax.coastlines()
+ax.add_feature(cfeature.BORDERS, linestyle=':')
+ax.add_feature(cfeature.STATES, linestyle=':') 
+ax.set_extent([lon_min - 360, lon_max - 360, lat_min, lat_max], crs=ccrs.PlateCarree()) 
+ax.set_title(f'Mean BSS for SPEAR (Texas) - Dry Events')
+
+fig.patch.set_alpha(0)
+ax.set_facecolor('none')
+
+fig.colorbar(im, ax=ax, orientation='horizontal', shrink=0.8, label='BSS')
+
+plt.show()
+observation_data.close()
+
+#BBS for CFSv2
+
+import netCDF4 as nc
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.interpolate as interp
+import datetime
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
+forecast_files = [
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201506.nc',
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201606.nc',
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201706.nc',
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201806.nc'
+]
+
+observation_file = '/data/aydin/project/transition/USA/BSS_new/data/observation/daymet/precipitation/res2spear_all/concatenated_daymet_res2spear.nc'
+observation_data = nc.Dataset(observation_file, 'r')
+observation_prcp = observation_data.variables['prcp'][:]
+
+lat_min, lat_max = 25, 40
+lon_min, lon_max = 252, 268  
+
+def match_grids(forecast_data, forecast_lat, forecast_lon, observation_lat, observation_lon):
+    interp_func = interp.interp2d(forecast_lon, forecast_lat, forecast_data, kind='linear')
+    forecast_data_interp = interp_func(observation_lon, observation_lat)
+    return forecast_data_interp
+
+upper_threshold = 50.0  
+
+bss_maps = []
+
+for j, file in enumerate(forecast_files):
+    forecast_data = nc.Dataset(file, 'r')
+    forecast_prcp = forecast_data.variables['prate'][:]
+
+    forecast_year = int(file.split('_')[-1].split('.')[0][:4])
+    forecast_month = int(file.split('_')[-1].split('.')[0][4:6])
+    start_date = datetime.datetime(forecast_year, forecast_month, 1)
+    end_date = datetime.datetime(forecast_year, forecast_month, 30) 
+
+    observation_time = nc.num2date(observation_data.variables['time'][:],
+                                   observation_data.variables['time'].units,
+                                   observation_data.variables['time'].calendar)
+    time_mask = (observation_time >= start_date) & (observation_time <= end_date)
+    observation_prcp_subset = observation_prcp[time_mask, :, :]
+
+    forecast_lat = forecast_data.variables['latitude'][:]
+    forecast_lon = forecast_data.variables['longitude'][:]
+    observation_lat = observation_data.variables['lat'][:]
+    observation_lon = observation_data.variables['lon'][:]
+
+    lat_mask_forecast = (forecast_lat >= lat_min) & (forecast_lat <= lat_max)
+    lon_mask_forecast = (forecast_lon >= lon_min) & (forecast_lon <= lon_max)
+    lat_mask_observation = (observation_lat >= lat_min) & (observation_lat <= lat_max)
+    lon_mask_observation = (observation_lon >= lon_min) & (observation_lon <= lon_max)
+
+    forecast_prcp = forecast_prcp[:, :, lat_mask_forecast, :][:, :, :, lon_mask_forecast]
+    observation_prcp_subset = observation_prcp_subset[:, lat_mask_observation, :][:, :, lon_mask_observation]
+
+    forecast_prob_upper = np.mean(forecast_prcp >= upper_threshold, axis=0)  
+
+    forecast_prob_upper_matched = np.array([match_grids(forecast_prob_upper[i, :, :],
+                                                        forecast_lat[lat_mask_forecast],
+                                                        forecast_lon[lon_mask_forecast],
+                                                        observation_lat[lat_mask_observation],
+                                                        observation_lon[lon_mask_observation]) for i in range(forecast_prob_upper.shape[0])])
+
+    forecast_prob_upper_matched = np.mean(forecast_prob_upper_matched, axis=0)
+
+    forecast_prob_upper_flat = forecast_prob_upper_matched.flatten()
+    observation_binary_upper = (observation_prcp_subset >= upper_threshold).flatten()
+
+    bs = np.mean((forecast_prob_upper_flat - observation_binary_upper) ** 2)  
+    bs_ref = np.mean(observation_binary_upper) * (1 - np.mean(observation_binary_upper)) 
+    bss = 1 - (bs / bs_ref)  
+
+    bss_maps.append(forecast_prob_upper_matched) 
+
+    forecast_data.close()
+
+mean_bss_map = np.mean(bss_maps, axis=0)
+
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree(central_longitude=-100))
+
+contour_levels = np.linspace(0, 1, 10)  
+im = ax.contourf(observation_lon[lon_mask_observation], observation_lat[lat_mask_observation], mean_bss_map,
+                 transform=ccrs.PlateCarree(), cmap='viridis', levels=contour_levels, extend='both')
+
+ax.coastlines()
+ax.add_feature(cfeature.BORDERS, linestyle=':')
+ax.add_feature(cfeature.STATES, linestyle=':')
+ax.set_extent([lon_min - 360, lon_max - 360, lat_min, lat_max], crs=ccrs.PlateCarree()) 
+ax.set_title(f'Mean BSS for CFSv2 (Texas) - Wet Events')
+
+fig.patch.set_alpha(0)
+ax.set_facecolor('none')
+
+fig.colorbar(im, ax=ax, orientation='horizontal', shrink=0.8, label='BSS')
+
+plt.show()
+observation_data.close()
+
+
+#ROC for SPEAR & CFSv2
+
+import netCDF4 as nc
+import numpy as np
+from sklearn.metrics import roc_curve, roc_auc_score
+import matplotlib.pyplot as plt
+import scipy.interpolate as interp
+import datetime
+
+forecast_files_cfsv2 = [
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201206.nc',
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201406.nc',
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_201706.nc',
+    '/data-alph/aydin/project/EnsembleForecastVerification/Data/RawForecasts/cfsv2_monthly_lag/lag_ensemble_202006.nc'
+]
+
+forecast_labels_cfsv2 = [
+    'May 2012 (Drought Peak)',
+    'July 2014 (Rainfall Deficits)',
+    'May 2017 (Agriculture Impact)',
+    'August 2020 (Severe Drought)'
+]
+
+forecast_files_spear = [
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2012.05.nc',
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2014.05.nc',
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2017.05.nc',
+    '/data-alph/aydin/project/transition/USA/BSS_new/data/forecast/SPEAR/precipitation/monthly/spear_monthly_prcp_2020.05.nc'
+]
+
+forecast_labels_spear = [
+    'May 2012 (Drought Peak)',
+    'July 2014 (Rainfall Deficits)',
+    'May 2017 (Agriculture Impact)',
+    'August 2020 (Severe Drought)'
+]
+
+observation_file = '/data/aydin/project/transition/USA/BSS_new/data/observation/daymet/precipitation/res2spear_all/concatenated_daymet_res2spear.nc'
+observation_data = nc.Dataset(observation_file, 'r')
+observation_prcp = observation_data.variables['prcp'][:]
+
+lat_min, lat_max = 25, 40
+lon_min, lon_max = 255, 270  
+
+def match_grids(forecast_data, forecast_lat, forecast_lon, observation_lat, observation_lon):
+    interp_func = interp.interp2d(forecast_lon, forecast_lat, forecast_data, kind='linear')
+    forecast_data_interp = interp_func(observation_lon, observation_lat)
+    return forecast_data_interp
+
+lower_threshold = 10.0 
+
+colors = {
+    "aqua": "#B2E0E6",
+    "teal": "#0099CC",
+    "deep_blue": "#003366",
+    "observed": "red", 
+}
+
+plt.figure()
+
+for j, file in enumerate(forecast_files_cfsv2):
+    forecast_data = nc.Dataset(file, 'r')
+    forecast_prcp = forecast_data.variables['prate'][:]
+
+    forecast_year = int(file.split('_')[-1].split('.')[0][:4])
+    forecast_month = int(file.split('_')[-1].split('.')[0][4:6])
+    start_date = datetime.datetime(forecast_year, forecast_month, 1)
+    end_date = datetime.datetime(forecast_year, forecast_month, 30) 
+
+    observation_time = nc.num2date(observation_data.variables['time'][:],
+                                   observation_data.variables['time'].units,
+                                   observation_data.variables['time'].calendar)
+    time_mask = (observation_time >= start_date) & (observation_time <= end_date)
+    observation_prcp_subset = observation_prcp[time_mask, :, :]
+
+    forecast_lat = forecast_data.variables['latitude'][:]
+    forecast_lon = forecast_data.variables['longitude'][:]
+    observation_lat = observation_data.variables['lat'][:]
+    observation_lon = observation_data.variables['lon'][:]
+
+    lat_mask_forecast = (forecast_lat >= lat_min) & (forecast_lat <= lat_max)
+    lon_mask_forecast = (forecast_lon >= lon_min) & (forecast_lon <= lon_max)
+    lat_mask_observation = (observation_lat >= lat_min) & (observation_lat <= lat_max)
+    lon_mask_observation = (observation_lon >= lon_min) & (observation_lon <= lon_max)
+
+    forecast_prcp = forecast_prcp[:, :, lat_mask_forecast, :][:, :, :, lon_mask_forecast]
+    observation_prcp_subset = observation_prcp_subset[:, lat_mask_observation, :][:, :, lon_mask_observation]
+
+    forecast_prob_lower = np.mean(forecast_prcp <= lower_threshold, axis=0) 
+
+    forecast_prob_lower_matched = np.array([match_grids(forecast_prob_lower[i, :, :],
+                                                        forecast_lat[lat_mask_forecast],
+                                                        forecast_lon[lon_mask_forecast],
+                                                        observation_lat[lat_mask_observation],
+                                                        observation_lon[lon_mask_observation]) for i in range(forecast_prob_lower.shape[0])])
+
+    forecast_prob_lower_matched = np.mean(forecast_prob_lower_matched, axis=0)
+
+    forecast_prob_lower_flat = forecast_prob_lower_matched.flatten()
+    observation_binary_lower = (observation_prcp_subset <= lower_threshold).flatten()
+
+    if len(np.unique(observation_binary_lower)) > 1:
+        fpr_lower, tpr_lower, _ = roc_curve(observation_binary_lower, forecast_prob_lower_flat)
+        roc_auc_lower = roc_auc_score(observation_binary_lower, forecast_prob_lower_flat)
+        plt.plot(fpr_lower, tpr_lower, lw=2, color=colors['teal'], label=f'CFSv2 - {forecast_labels_cfsv2[j]} - Lower (area = %0.2f)' % roc_auc_lower)
+    else:
+        print(f"ROC AUC not defined for lower threshold in CFSv2 - {forecast_labels_cfsv2[j]}")
+
+    forecast_data.close() 
+
+
+for j, file in enumerate(forecast_files_spear):
+    forecast_data = nc.Dataset(file, 'r')
+    forecast_prcp = forecast_data.variables['precip'][:]
+
+    forecast_year = int(file.split('_')[-1].split('.')[0][:4])
+    forecast_month = int(file.split('.')[-2][-2:]) 
+    start_date = datetime.datetime(forecast_year, forecast_month, 1)
+    end_date = datetime.datetime(forecast_year, forecast_month, 30)
+
+    observation_time = nc.num2date(observation_data.variables['time'][:],
+                                   observation_data.variables['time'].units,
+                                   observation_data.variables['time'].calendar)
+    time_mask = (observation_time >= start_date) & (observation_time <= end_date)
+    observation_prcp_subset = observation_prcp[time_mask, :, :]
+
+    lat = forecast_data.variables['lat'][:]
+    lon = forecast_data.variables['lon'][:]
+    lat_mask = (lat >= lat_min) & (lat <= lat_max)
+    lon_mask = (lon >= lon_min) & (lon <= lon_max)
+
+    forecast_prcp = forecast_prcp[:, :, lat_mask, :][:, :, :, lon_mask]
+    observation_prcp_subset = observation_prcp_subset[:, lat_mask, :][:, :, lon_mask]
+
+    lower_threshold = 10.0 
+
+    forecast_prob_lower = np.mean(forecast_prcp <= lower_threshold, axis=0) 
+
+    forecast_prob_lower_matched = np.mean(forecast_prob_lower, axis=0)
+
+    forecast_prob_lower_flat = forecast_prob_lower_matched.flatten()
+    observation_binary_lower = (observation_prcp_subset <= lower_threshold).flatten()
+
+    if len(np.unique(observation_binary_lower)) > 1:
+        fpr_lower, tpr_lower, _ = roc_curve(observation_binary_lower, forecast_prob_lower_flat)
+        roc_auc_lower = roc_auc_score(observation_binary_lower, forecast_prob_lower_flat)
+        plt.plot(fpr_lower, tpr_lower, lw=2, color=colors['aqua'], label=f'SPEAR - {forecast_labels_spear[j]} - Lower (area = %0.2f)' % roc_auc_lower)
+    else:
+        print(f"ROC AUC not defined for lower threshold in SPEAR - {forecast_labels_spear[j]}")
+
+    forecast_data.close()
+
+plt.plot([0, 1], [0, 1], color=colors['observed'], lw=2, linestyle='--') 
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title(f'Receiver Operating Characteristic - CFSv2 vs. SPEAR (Southern Plains)')
+plt.legend(loc="lower right")
+plt.show()
+
+observation_data.close()
+
+
+
